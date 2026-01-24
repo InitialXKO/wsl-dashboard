@@ -37,6 +37,7 @@ export component MainView inherits VerticalLayout {
                 alignment: start;
                 for d in distros: DistroCard {
                     distro: d;
+                    sole_distro: distros.length == 1;
                     start_clicked => {
                         root.start_distro(d.name);
                     }
