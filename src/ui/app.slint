@@ -70,6 +70,8 @@ export component AppWindow inherits Window {
     in-out property <string> move_target_path: "";
     in property <string> move_error: "";
     in-out property <string> move_original_path: "";
+    in-out property <bool> show_move_confirm: false;
+    in-out property <string> move_confirm_message: "";
     in-out property <bool> show_message_dialog: false;
     in-out property <string> current_message: "";
     in-out property <string> current_message_link: "";
@@ -140,6 +142,8 @@ export component AppWindow inherits Window {
     callback open_move_dialog(string);
     callback select_move_folder();
     callback confirm_move(string, string, string);
+    callback confirm_move_action();
+    callback cancel_move_confirm();
     callback close_message_dialog();
     callback message_link_clicked();
     callback message_action_clicked(string);
@@ -380,6 +384,15 @@ export component AppWindow inherits Window {
             }
             confirm_move(p) => {
                 root.confirm_move(root.move_source_name, root.move_target_name, p);
+            }
+            show_move_confirm: root.show_move_confirm;
+            move_confirm_message: root.move_confirm_message;
+            confirm_move_action => {
+                root.confirm_move_action();
+            }
+            cancel_move_confirm => {
+                root.show_move_confirm = false;
+                root.cancel_move_confirm();
             }
             show_message: root.show_message_dialog;
             message_text: root.current_message;

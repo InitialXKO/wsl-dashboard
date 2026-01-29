@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use tokio::sync::{Mutex, Notify};
 use tokio::time::Duration;
 
@@ -23,8 +23,9 @@ pub struct WslDashboard {
     refresh_interval: Duration,
     // Status change notifier, notifies listeners when WSL status changes
     state_changed: Arc<Notify>,
-    // Manual operation flag, prevents conflict between background monitoring and manual operations
-    manual_operation: Arc<AtomicBool>,
+    // Manual operation counter, prevents conflict between background monitoring and manual operations.
+    // > 0 means a manual operation is in progress.
+    manual_operation: Arc<std::sync::atomic::AtomicI32>,
     // Heavy operation lock, ensures only one heavy WSL operation (delete, move, etc.) runs at a time
     heavy_op_lock: Arc<Mutex<()>>,
 }
@@ -43,7 +44,7 @@ impl WslDashboard {
             distros: Arc::new(Mutex::new(Vec::new())),
             refresh_interval: Duration::from_secs(5),
             state_changed: Arc::new(Notify::new()),
-            manual_operation: Arc::new(AtomicBool::new(false)),
+            manual_operation: Arc::new(std::sync::atomic::AtomicI32::new(0)),
             heavy_op_lock: Arc::new(Mutex::new(())),
         }
     }
@@ -66,7 +67,28 @@ impl WslDashboard {
 
     // Check if manual operation is in progress
     pub fn is_manual_operation(&self) -> bool {
-        self.manual_operation.load(Ordering::SeqCst)
+        self.manual_operation.load(Ordering::SeqCst) > 0
+    }
+
+    // Explicitly set manual operation (use with caution, better use inc/dec)
+    pub fn set_manual_operation(&self, value: bool) {
+        if value {
+            self.increment_manual_operation();
+        } else {
+            self.decrement_manual_operation();
+        }
+    }
+
+    pub fn increment_manual_operation(&self) {
+        self.manual_operation.fetch_add(1, Ordering::SeqCst);
+    }
+
+    pub fn decrement_manual_operation(&self) {
+        let old = self.manual_operation.fetch_sub(1, Ordering::SeqCst);
+        if old <= 0 {
+            // Safety: don't go below 0
+            self.manual_operation.store(0, Ordering::SeqCst);
+        }
     }
 
     // Manually refresh WSL subsystem list
@@ -166,7 +188,7 @@ impl WslDashboard {
     // - Failure: Returns `WslCommandResult` containing error information
     pub async fn start_distro(&self, name: &str) -> WslCommandResult<String> {
         // Set manual operation flag to prevent background monitoring interference
-        self.manual_operation.store(true, Ordering::SeqCst);
+        self.increment_manual_operation();
         
         let result = self.executor.start_distro(name).await;
         if result.success {
@@ -184,12 +206,12 @@ impl WslDashboard {
                 let _ = manager_clone.refresh_distros().await;
                 
                 // Clear manual operation flag after operation completes
-                manager_clone.manual_operation.store(false, Ordering::SeqCst);
+                manager_clone.decrement_manual_operation();
                 tracing::info!("Manual operation completed, resumed automatic monitoring");
             });
         } else {
             // Also clear manual operation flag on operation failure
-            self.manual_operation.store(false, Ordering::SeqCst);
+            self.decrement_manual_operation();
         }
         result
     }
@@ -207,7 +229,7 @@ impl WslDashboard {
     // - Failure: Returns `WslCommandResult` containing error information
     pub async fn stop_distro(&self, name: &str) -> WslCommandResult<String> {
         // Set manual operation flag to prevent background monitoring interference
-        self.manual_operation.store(true, Ordering::SeqCst);
+        self.increment_manual_operation();
         
         let result = self.executor.stop_distro(name).await;
         if result.success {
@@ -225,12 +247,12 @@ impl WslDashboard {
                 let _ = manager_clone.refresh_distros().await;
                 
                 // Clear manual operation flag after operation completes
-                manager_clone.manual_operation.store(false, Ordering::SeqCst);
+                manager_clone.decrement_manual_operation();
                 tracing::info!("Manual operation completed, resumed automatic monitoring");
             });
         } else {
             // Also clear manual operation flag on operation failure
-            self.manual_operation.store(false, Ordering::SeqCst);
+            self.decrement_manual_operation();
         }
         result
     }
@@ -282,6 +304,7 @@ impl WslDashboard {
     // - Success: Returns `WslCommandResult` containing success message
     // - Failure: Returns `WslCommandResult` containing error information
     pub async fn shutdown_wsl(&self) -> WslCommandResult<String> {
+        self.increment_manual_operation();
         tracing::info!("Initiating WSL system shutdown");
         let result = self.executor.shutdown_wsl().await;
         
@@ -299,6 +322,7 @@ impl WslDashboard {
             tracing::warn!("WSL system shutdown failed: {:?}", result.error);
         }
         
+        self.decrement_manual_operation();
         result
     }
 
@@ -316,7 +340,7 @@ impl WslDashboard {
     pub async fn delete_distro(&self, config_manager: &crate::config::ConfigManager, name: &str) -> WslCommandResult<String> {
         let _heavy_lock = self.heavy_op_lock.lock().await;
         // Set manual operation flag to prevent background monitoring interference
-        self.manual_operation.store(true, Ordering::SeqCst);
+        self.increment_manual_operation();
 
         tracing::warn!("Initiating deletion of WSL distro '{}' (irreversible operation)", name);
         let result = self.executor.delete_distro(config_manager, name).await;
@@ -338,13 +362,13 @@ impl WslDashboard {
                 ).await;
                 
                 // Clear manual operation flag after operation AND refresh completes
-                manager.manual_operation.store(false, Ordering::SeqCst);
+                manager.decrement_manual_operation();
                 tracing::info!("Manual operation (delete) completed, resumed automatic monitoring");
             });
         } else {
             tracing::warn!("Failed to delete WSL distro '{}': {:?}", name, result.error);
             // Clear manual operation flag on failure
-            self.manual_operation.store(false, Ordering::SeqCst);
+            self.decrement_manual_operation();
         }
 
         result
@@ -364,7 +388,7 @@ impl WslDashboard {
     pub async fn export_distro(&self, name: &str, file_path: &str) -> WslCommandResult<String> {
         let _heavy_lock = self.heavy_op_lock.lock().await;
         // Set manual operation flag
-        self.manual_operation.store(true, Ordering::SeqCst);
+        self.increment_manual_operation();
 
         tracing::info!("Initiating export of WSL distro '{}' to file '{}'", name, file_path);
         let result = self.executor.export_distro(name, file_path).await;
@@ -376,7 +400,7 @@ impl WslDashboard {
         }
         
         // Clear manual operation flag
-        self.manual_operation.store(false, Ordering::SeqCst);
+        self.decrement_manual_operation();
 
         result
     }
@@ -396,7 +420,7 @@ impl WslDashboard {
     pub async fn import_distro(&self, name: &str, install_location: &str, file_path: &str) -> WslCommandResult<String> {
         let _heavy_lock = self.heavy_op_lock.lock().await;
         // Set manual operation flag
-        self.manual_operation.store(true, Ordering::SeqCst);
+        self.increment_manual_operation();
 
         tracing::info!("Initiating import of WSL distro '{}' from file '{}' to location '{}'", 
                       name, file_path, install_location);
@@ -412,7 +436,7 @@ impl WslDashboard {
         }
         
         // Clear manual operation flag
-        self.manual_operation.store(false, Ordering::SeqCst);
+        self.decrement_manual_operation();
 
         result
     }
@@ -431,7 +455,7 @@ impl WslDashboard {
     pub async fn move_distro(&self, name: &str, new_path: &str) -> WslCommandResult<String> {
         let _heavy_lock = self.heavy_op_lock.lock().await;
         // Set manual operation flag
-        self.manual_operation.store(true, Ordering::SeqCst);
+        self.increment_manual_operation();
 
         tracing::info!("Initiating move of WSL distro '{}' to '{}'", name, new_path);
         let result = self.executor.move_distro(name, new_path).await;
@@ -445,7 +469,7 @@ impl WslDashboard {
         }
         
         // Clear manual operation flag
-        self.manual_operation.store(false, Ordering::SeqCst);
+        self.decrement_manual_operation();
 
         result
     }
