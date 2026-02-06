@@ -1,4 +1,4 @@
-import { Button, LineEdit } from "std-widgets.slint";
+import { Button, LineEdit, CheckBox } from "std-widgets.slint";
 import { Theme, AppI18n } from "../../theme.slint";
 
 export component CloneDialog inherits Rectangle {
@@ -81,7 +81,6 @@ export component CloneDialog inherits Rectangle {
                 }
             }
 
-            import { CheckBox } from "std-widgets.slint";
             CheckBox {
                 text: "Start after clone";
                 checked <=> start_after_clone;
